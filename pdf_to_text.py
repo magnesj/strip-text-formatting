@@ -8,13 +8,14 @@ Usage: python pdf_to_text.py input.pdf [output_path]
 import re
 import statistics
 import sys
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
 
-LIST_MARKER = r"(?:\(?\d{1,3}[.)]|\(?[A-Za-z][.)]|\(?[ivxIVX]{1,5}[.)]|[•·▪◦‣*–\-])"
+LIST_MARKER = r"(?:\(?\d{1,3}[.)]|\(?[A-Za-zÆØÅæøå][.)]|\(?[ivxIVX]{1,5}[.)]|[•·▪◦‣*–\-])"
 STARTS_WITH_MARKER = re.compile(LIST_MARKER + r"(?:\s|$)")
 ONLY_MARKER = re.compile(LIST_MARKER + r"$")
 PAGE_NUMBER = re.compile(r"\W*(?:page\s*)?\d+\W*$", re.IGNORECASE)
@@ -49,7 +50,8 @@ def join_spans(spans):
             text += " "
         text += span["text"]
         previous = span
-    return " ".join(text.split())
+    # Some PDFs store å as a + combining ring, which breaks searching and sorting.
+    return " ".join(unicodedata.normalize("NFC", text).split())
 
 
 def read_line(raw_line, page_number, page_height):
@@ -190,6 +192,16 @@ def render(paragraphs):
     return text + "\n"
 
 
+def has_unmapped_fonts(document):
+    """Without a character map, a font's letters cannot be read and come out as garbage."""
+    for page in document:
+        for font in page.get_fonts():
+            xref, encoding = font[0], font[5]
+            if encoding.startswith("Identity") and document.xref_get_key(xref, "ToUnicode")[0] == "null":
+                return True
+    return False
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(f"Usage: {Path(sys.argv[0]).name} input.pdf [output_path]")
@@ -202,12 +214,18 @@ def main():
 
     with pymupdf.open(source) as document:
         lines = remove_headers_and_footers(read_lines(document), document.page_count)
+        unmapped_fonts = has_unmapped_fonts(document)
 
     if not lines:
         sys.exit(f"No text found in {source}. It may be a scanned PDF, which needs OCR first.")
 
-    output.write_text(render(build_paragraphs(lines)), encoding="utf-8")
+    text = render(build_paragraphs(lines))
+    # The byte order mark makes Windows tools such as PowerShell 5.1 read æøå correctly.
+    output.write_text(text, encoding="utf-8-sig")
     print(f"Wrote {output}")
+
+    if unmapped_fonts or "\ufffd" in text:
+        print("Warning: this PDF has text that cannot be read reliably, so some letters may be wrong.", file=sys.stderr)
 
 
 if __name__ == "__main__":
